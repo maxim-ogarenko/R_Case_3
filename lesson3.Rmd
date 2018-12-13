@@ -1,0 +1,159 @@
+---
+title: "Inventory Case Study"
+author: "Maxim Ogarenko"
+date: '11 декабря 2018 г '
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r prep, include=FALSE}
+if(!file.exists("Lesson3")) dir.create("./myRcourse/Lesson3")
+setwd("C:/Users/Admin/Documents/myRcourse/Lesson3")
+library(dplyr)
+rm(list = ls())
+```
+
+##Анализ запасов оптовой компании
+Вы - финансист семейного офиса известного российского предпринимателя. Вам поручили провести финансовый анализ торговой компании, которую Ваш работодатель ракссматривает для покупки.
+
+На данном этапе необходимо провести экспресс анализ качества запасов компании по состоянию на апрель 2018 г. В Вашем распоряжении выгрузка из 1С с:
+
+1) продаж в натуральном и стоимостном выражении, по СКЮ, с июля по декабрь 2017 г., и с января по апрель 2018 г.
+2) запасов в штуках на конец месяца за те же периоды
+3) себестоимости в руб. каждого СКЮ
+
+#Чтение всех файлов
+```{r read in, echo=TRUE}
+sales_units17 <- read.csv("sales_units2017.csv", header = TRUE, sep = ";")
+sales_units18 <- read.csv("sales_units2018.csv", header = TRUE, sep = ";")
+cogs <- read.csv("cog_per_unit.csv", header = TRUE, sep = ";", dec = ",")
+stock17 <- read.csv("stock_units2017.csv", header = TRUE, sep = ";")
+stock18 <- read.csv("stock_units2018.csv", header = TRUE, sep = ";")
+```
+Посмотрев на исходные данные, мы видим, что номенклатура товаров в разных файлах не полностью совпадает. При этом мы уверены в том, что учётная система анализируемой компании обеспечивала единство названий во всех типах отчетов. 
+
+#Формирование единого списка товаров
+Извлечём векторы с названиями товара из всех таблиц, объединим в один, после чего оставим только уникальные значения.
+```{r sku, echo=TRUE}
+skus <- c(as.character(sales_units17[, 1]), 
+         as.character(sales_units18[, 1]),
+         as.character(stock17[, 1]), 
+         as.character(stock18[, 1]), 
+         as.character(cogs$SKU))
+skus <- data.frame(unique(skus))
+```
+
+#Правка заголовков таблиц
+Нам потребуется объединять эти таблицы. Для этого нам необходимо обеспечить одинаковое название столбца с наименованиями во всех таблицах.
+```{r header, echo=TRUE}
+colnames(skus) <- "SKU"
+names(stock17)[1] <- "SKU"
+names(stock18)[1] <- "SKU"
+names(sales_units17)[1] <- "SKU"
+names(sales_units18)[1] <- "SKU"
+```
+
+#Формирование объединённой таблицы с запасами
+Объединим список уникальных названий, запасы 2017 и 2018 г.г. Перепишем NA как 0.
+```{r stock, echo=TRUE}
+stock <- merge(skus, stock17, all = TRUE, by = "SKU")
+stock <- merge(stock, all = TRUE, stock18)
+stock[is.na(stock)] <- 0
+```
+
+#Формирование объединённой таблицы со среднедневными продажами в шт.
+Мы будем использовать тот же перечень номенклатуры для таблицы с продажами.
+```{r sales, echo=TRUE}
+sales <- merge(skus, sales_units17, all = TRUE, by = "SKU")
+sales <- merge(sales, sales_units18, all = TRUE, by = "SKU")
+sales[, -1][sales[, -1] < 0] <- 0
+sales[is.na(sales)] <- 0
+daily_sales <- sales[, -1] / 30
+```
+
+#Формирование таблицы с себестоимостью
+"Подтянем" себестоимости каждого СКЮ в тот же перечень номенклатуры.
+```{r cogs, echo=TRUE}
+cogs <- merge(skus, cogs, all = TRUE, by = "SKU")
+cogs[is.na(cogs)] <- 0
+```
+
+#Расчёт сроков оборачиваемости 
+Рассчитаем сроки оборачиваемости каждого СКЮ в каждом месяце как запасы на конец месяца / среднедневные продажи. Деление на нулевые продажи месяца даёт бесконечность - обратим значения Inf в 0.
+
+Таблицы с запасами и продажами имеют одинаковую номенклатуру, что позволяет производить деление датафрейма на датафрейм.
+```{r turnover days, echo=TRUE}
+inv_days <- as.matrix(stock[, -1] / daily_sales)
+inv_days[!is.finite(inv_days)] <- 0
+inv_days <- data.frame(skus, inv_days)
+```
+
+#Формирование таблицы с запасами в руб.
+Умножим запасы на себестоимость штуки, суммируем месячные итоги.
+```{r inventory, echo=TRUE}
+inventory <- as.matrix(stock[, -1] * cogs$COG)
+inventory <- data.frame(skus, inventory)
+inventory_totals <- unname(round(colSums(inventory[, -1])/10^6, 1))
+```
+
+#Расчёт дефицитов
+Сформируем таблицу с дефицитом в днях продаж. Умножим эту таблицу на среднедневные продажи, получив дефициты в штуках. Умножим натуральные дефициты на себестоимость, суммируем итоги. 
+```{r deficit, echo=TRUE}
+deficit_days <- 90
+deficit <- deficit_days - inv_days[, -1]
+deficit[deficit < 0] <- 0
+deficit <- deficit * daily_sales * cogs$COG
+deficit <- data.frame(skus, deficit)
+deficit_totals <- unname(round(colSums(deficit[, -1])/10^6, 1))
+```
+
+#Расчёт излишков
+Аналогично.
+```{r overstock, echo=TRUE}
+overstock_days <- 150
+overstock <- inv_days[, -1] - overstock_days
+overstock[overstock < 0] <- 0
+overstock <- overstock * daily_sales * cogs$COG
+overstock <- data.frame(skus, overstock)
+overstock_totals <- unname(round(colSums(overstock[, -1])/10^6, 1))
+```
+
+#Итоговый отчёт
+```{r report, echo=TRUE}
+report <- data.frame(colnames(stock)[2:11], 
+                     inventory_totals,
+                     deficit_totals, 
+                     overstock_totals)
+colnames(report) <- c("Month", "Inventory", "Deficit", "Overstock")
+{print("Inventory, Deficits and Overstocks, in mln Rub") 
+report}
+```
+
+```{r plot, echo=TRUE}
+barplot(height = inventory_totals, 
+        names.arg = report$Month, 
+        ylim = c(0, 80),
+        ylab = "Запасы, в млн. руб.", 
+        cex.names = 0.8,
+        las = 2, 
+        main = "Динамика запасов, в млн. руб.")
+
+barplot(height = deficit_totals, 
+        names.arg = report$Month, 
+        ylim = c(0, 80),
+        ylab = "Дефицит, в млн. руб.", 
+        cex.names = 0.8,
+        las = 2, 
+        main = "Динамика дефицита, в млн. руб.")
+
+barplot(height = overstock_totals, 
+        names.arg = report$Month, 
+        ylim = c(0, 80),
+        ylab = "Излишек, в млн. руб.", 
+        cex.names = 0.8,
+        las = 2, 
+        main = "Динамика излишка, в млн. руб.")
+```
